@@ -19,5 +19,6 @@
 vllm/vllm-openai:v0.6.0
 vllm/vllm-openai:v0.17.1
 vllm/vllm-openai:v0.8.5
+vllm/vllm-openai:qwen3_5-x86_64-cu129
 
 
