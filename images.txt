@@ -20,6 +20,7 @@
 #vllm/vllm-openai:v0.17.1
 #vllm/vllm-openai:v0.8.5
 #vllm/vllm-openai:qwen3_5-x86_64-cu129
-rocm/llama.cpp:llama.cpp-b6652.amd0_rocm7.0.0_ubuntu22.04_server
+#rocm/llama.cpp:llama.cpp-b6652.amd0_rocm7.0.0_ubuntu22.04_server
+ghcr.io/ggerganov/llama.cpp:server--b6652
 
 
