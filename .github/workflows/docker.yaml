@@ -24,7 +24,7 @@ env:
 
 jobs:
   mirror:
-    name: Mirror all architectures
+    name: Mirror amd64 and arm64 images
     runs-on: ubuntu-latest
 
     steps:
@@ -54,7 +54,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y skopeo jq
 
-      - name: Login to Aliyun Registry
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Aliyun Registry for Buildx
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ env.ALIYUN_REGISTRY_USER }}
+          password: ${{ env.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Login to Aliyun Registry for Skopeo
         shell: bash
         run: |
           set -euo pipefail
@@ -64,7 +74,7 @@ jobs:
               --username "$ALIYUN_REGISTRY_USER" \
               --password-stdin
 
-      - name: Mirror all architectures
+      - name: Mirror amd64 and arm64
         shell: bash
         run: |
           set -euo pipefail
@@ -72,9 +82,8 @@ jobs:
           derive_target() {
             local source="$1"
 
-            # 带 digest 的源镜像必须显式给出第二列目标 tag。
             if [[ "$source" == *@* ]]; then
-              echo "Digest image requires an explicit target tag: ${source}" >&2
+              echo "Digest source requires an explicit target tag: ${source}" >&2
               return 1
             fi
 
@@ -85,42 +94,82 @@ jobs:
             printf '%s' "${source//\//_}"
           }
 
+          ensure_tag() {
+            local image="$1"
+            local last_part="${image##*/}"
+
+            if [[ "$last_part" == *:* ]]; then
+              printf '%s' "$image"
+            else
+              printf '%s:latest' "$image"
+            fi
+          }
+
+          arch_tag() {
+            local image="$1"
+            local arch="$2"
+
+            printf '%s-%s' "$image" "$arch"
+          }
+
           while read -r source target extra; do
             [[ -z "${source:-}" || "$source" == \#* ]] && continue
 
             if [[ -n "${extra:-}" ]]; then
-              echo "Invalid images.txt line. Expected one or two columns:"
-              echo "<source-image> [target-image]"
+              echo "Invalid images.txt line. Expected: <source-image> [target-image]"
               echo "Actual: ${source} ${target} ${extra}"
               exit 1
             fi
 
-            # 第二列可选；未提供时，自动基于源镜像生成目标名。
             if [[ -z "${target:-}" ]]; then
               target="$(derive_target "$source")"
             fi
 
+            target="$(ensure_tag "$target")"
+
             destination="${ALIYUN_REGISTRY}/${ALIYUN_NAME_SPACE}/${target}"
+            destination_amd64="$(arch_tag "$destination" "amd64")"
+            destination_arm64="$(arch_tag "$destination" "arm64")"
 
             echo "::group::Mirror ${source} -> ${destination}"
 
-            # --all 会同步源镜像的 manifest list，包括 amd64、arm64 等全部架构。
+            echo "Copy linux/amd64"
             skopeo copy \
-              --all \
+              --override-os linux \
+              --override-arch amd64 \
               --retry-times 3 \
               "docker://${source}" \
-              "docker://${destination}"
+              "docker://${destination_amd64}"
 
-            echo "Destination platforms:"
-            skopeo inspect --raw "docker://${destination}" |
-              jq -r '
-                if has("manifests") then
-                  .manifests[].platform | "\(.os)/\(.architecture)"
-                else
-                  "single-platform manifest"
-                end
-              ' |
-              sort -u
+            echo "Copy linux/arm64"
+            skopeo copy \
+              --override-os linux \
+              --override-arch arm64 \
+              --retry-times 3 \
+              "docker://${source}" \
+              "docker://${destination_arm64}"
+
+            echo "Create multi-architecture manifest"
+            docker buildx imagetools create \
+              --prefer-index=true \
+              --tag "${destination}" \
+              "${destination_amd64}" \
+              "${destination_arm64}"
+
+            echo "Verify destination platforms"
+            platforms="$(
+              skopeo inspect --raw "docker://${destination}" |
+                jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' |
+                sort -u
+            )"
+
+            echo "${platforms}"
+
+            if [[ "${platforms}" != $'linux/amd64\nlinux/arm64' ]]; then
+              echo "Unexpected destination platforms:"
+              echo "${platforms}"
+              exit 1
+            fi
 
             echo "::endgroup::"
           done < images.txt
