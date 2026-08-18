@@ -24,14 +24,14 @@ env:
 
 jobs:
   mirror:
-    name: Mirror Multi-Architecture Images
+    name: Mirror all architectures
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate required secrets
+      - name: Validate secrets
         shell: bash
         run: |
           set -euo pipefail
@@ -69,25 +69,42 @@ jobs:
         run: |
           set -euo pipefail
 
+          derive_target() {
+            local source="$1"
+
+            # 带 digest 的源镜像必须显式给出第二列目标 tag。
+            if [[ "$source" == *@* ]]; then
+              echo "Digest image requires an explicit target tag: ${source}" >&2
+              return 1
+            fi
+
+            source="${source#docker.io/}"
+            source="${source#registry-1.docker.io/}"
+
+            # nginx/nginx-ingress:5.5.4 -> nginx_nginx-ingress:5.5.4
+            printf '%s' "${source//\//_}"
+          }
+
           while read -r source target extra; do
             [[ -z "${source:-}" || "$source" == \#* ]] && continue
 
-            if [[ -z "${target:-}" ]]; then
-              echo "Invalid images.txt line. Expected: <source-image> <target-image>"
-              echo "Actual source: ${source}"
+            if [[ -n "${extra:-}" ]]; then
+              echo "Invalid images.txt line. Expected one or two columns:"
+              echo "<source-image> [target-image]"
+              echo "Actual: ${source} ${target} ${extra}"
               exit 1
             fi
 
-            if [[ -n "${extra:-}" ]]; then
-              echo "Invalid images.txt line. Only two columns are allowed: ${source} ${target} ${extra}"
-              exit 1
+            # 第二列可选；未提供时，自动基于源镜像生成目标名。
+            if [[ -z "${target:-}" ]]; then
+              target="$(derive_target "$source")"
             fi
 
             destination="${ALIYUN_REGISTRY}/${ALIYUN_NAME_SPACE}/${target}"
 
             echo "::group::Mirror ${source} -> ${destination}"
 
-            # --all 保留源镜像的 OCI manifest list，包括 amd64、arm64 等全部架构。
+            # --all 会同步源镜像的 manifest list，包括 amd64、arm64 等全部架构。
             skopeo copy \
               --all \
               --retry-times 3 \
@@ -96,8 +113,14 @@ jobs:
 
             echo "Destination platforms:"
             skopeo inspect --raw "docker://${destination}" |
-              jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' |
-              sort -u || true
+              jq -r '
+                if has("manifests") then
+                  .manifests[].platform | "\(.os)/\(.architecture)"
+                else
+                  "single-platform manifest"
+                end
+              ' |
+              sort -u
 
             echo "::endgroup::"
           done < images.txt
